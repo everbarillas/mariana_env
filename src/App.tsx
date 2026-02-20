@@ -1,13 +1,65 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import type { Project, Task } from './types/types'
 import { getProjectTasks, getProjects } from './api'
 
-function formatDate(value: string | null) {
-  if (!value) return '—'
+const ROW_HEIGHT = 48
+
+function parseDate(value: string | null) {
+  if (!value) return null
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function formatDate(value: Date | string | null) {
+  if (!value) return '—'
+  const date = typeof value === 'string' ? new Date(value) : value
+  if (Number.isNaN(date.getTime())) return typeof value === 'string' ? value : '—'
   return date.toLocaleDateString()
+}
+
+function formatShortDate(value: Date | null) {
+  if (!value) return '—'
+  return value.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+function compareTasks(a: Task, b: Task) {
+  const aStart = parseDate(a.startDate)?.getTime() ?? Number.POSITIVE_INFINITY
+  const bStart = parseDate(b.startDate)?.getTime() ?? Number.POSITIVE_INFINITY
+  if (aStart !== bStart) return aStart - bStart
+  return a.name.localeCompare(b.name)
+}
+
+function buildTaskRows(tasks: Task[]) {
+  const byParent = new Map<number | null, Task[]>()
+  tasks.forEach((task) => {
+    const key = task.parentTaskId ?? null
+    const group = byParent.get(key)
+    if (group) {
+      group.push(task)
+    } else {
+      byParent.set(key, [task])
+    }
+  })
+
+  const rows: Array<{ task: Task; depth: number; number: string }> = []
+  const visit = (task: Task, depth: number, number: string) => {
+    rows.push({ task, depth, number })
+    const children = (byParent.get(task.id) ?? []).slice().sort(compareTasks)
+    children.forEach((child, index) => visit(child, depth + 1, `${number}.${index + 1}`))
+  }
+
+  const roots = (byParent.get(null) ?? []).slice().sort(compareTasks)
+  roots.forEach((root, index) => visit(root, 0, `${index + 1}`))
+
+  return rows
+}
+
+function getTaskRange(task: Task) {
+  const start = parseDate(task.startDate)
+  const end = parseDate(task.dueDate) ?? start
+  if (!start || !end) return null
+  return { start, end }
 }
 
 function App() {
@@ -16,32 +68,34 @@ function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null)
   const [projectsError, setProjectsError] = useState<string | null>(null)
   const [tasksError, setTasksError] = useState<string | null>(null)
-  const [isProjectsLoading, setIsProjectsLoading] = useState(false)
+  const [isProjectsLoading, setIsProjectsLoading] = useState(true)
   const [isTasksLoading, setIsTasksLoading] = useState(false)
-  const [allTasksByProject, setAllTasksByProject] = useState<Record<number, Task[]>>({})
-  const [isAllLoading, setIsAllLoading] = useState(false)
-  const [allError, setAllError] = useState<string | null>(null)
-  const allRequestId = useRef(0)
+  const timelineRef = useRef<HTMLDivElement | null>(null)
+  const [timelineWidth, setTimelineWidth] = useState(0)
 
   useEffect(() => {
     let isActive = true
-    setIsProjectsLoading(true)
-    setProjectsError(null)
 
-    getProjects()
-      .then((data) => {
+    const loadProjects = async () => {
+      setProjectsError(null)
+      setIsProjectsLoading(true)
+
+      try {
+        const data = await getProjects()
         if (!isActive) return
         setProjects(data)
         setSelectedProjectId((current) => current ?? data[0]?.id ?? null)
-      })
-      .catch((error: Error) => {
+      } catch (error) {
         if (!isActive) return
-        setProjectsError(error.message)
-      })
-      .finally(() => {
-        if (!isActive) return
-        setIsProjectsLoading(false)
-      })
+        setProjectsError(error instanceof Error ? error.message : 'Failed to load projects')
+      } finally {
+        if (isActive) {
+          setIsProjectsLoading(false)
+        }
+      }
+    }
+
+    void loadProjects()
 
     return () => {
       isActive = false
@@ -49,92 +103,136 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (selectedProjectId === null) {
-      setTasks([])
-      return
-    }
+    if (selectedProjectId === null) return
 
     let isActive = true
-    setIsTasksLoading(true)
-    setTasksError(null)
 
-    getProjectTasks(selectedProjectId)
-      .then((data) => {
+    const loadTasks = async () => {
+      setTasksError(null)
+      setIsTasksLoading(true)
+
+      try {
+        const data = await getProjectTasks(selectedProjectId)
         if (!isActive) return
         setTasks(data)
-      })
-      .catch((error: Error) => {
+      } catch (error) {
         if (!isActive) return
-        setTasksError(error.message)
-      })
-      .finally(() => {
-        if (!isActive) return
-        setIsTasksLoading(false)
-      })
+        setTasksError(error instanceof Error ? error.message : 'Failed to load tasks')
+      } finally {
+        if (isActive) {
+          setIsTasksLoading(false)
+        }
+      }
+    }
+
+    void loadTasks()
 
     return () => {
       isActive = false
     }
   }, [selectedProjectId])
 
+  useLayoutEffect(() => {
+    const element = timelineRef.current
+    if (!element) return
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry) return
+      setTimelineWidth(entry.contentRect.width)
+    })
+
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId]
   )
 
-  const allProjectGroups = useMemo(() => {
-    if (Object.keys(allTasksByProject).length === 0) return []
-    return projects.map((project) => ({
-      project,
-      tasks: allTasksByProject[project.id] ?? [],
-    }))
-  }, [allTasksByProject, projects])
+  const taskRows = useMemo(() => buildTaskRows(tasks), [tasks])
+  const taskIndexById = useMemo(() => {
+    const map = new Map<number, number>()
+    taskRows.forEach((row, index) => map.set(row.task.id, index))
+    return map
+  }, [taskRows])
 
-  const handleLoadAllProjects = async () => {
-    const requestId = ++allRequestId.current
-    setIsAllLoading(true)
-    setAllError(null)
+  const timelineRange = useMemo(() => {
+    const ranges = tasks.map(getTaskRange).filter(Boolean) as Array<{ start: Date; end: Date }>
+    if (ranges.length === 0) return null
 
-    try {
-      const nextProjects = await getProjects()
-      const taskEntries = await Promise.all(
-        nextProjects.map(async (project) => [project.id, await getProjectTasks(project.id)] as const)
-      )
+    const startMs = Math.min(...ranges.map((range) => range.start.getTime()))
+    const endMs = Math.max(...ranges.map((range) => range.end.getTime()))
+    const start = new Date(startMs)
+    const end = new Date(endMs)
 
-      if (allRequestId.current !== requestId) return
+    return { start, end, startMs, endMs }
+  }, [tasks])
 
-      setProjects(nextProjects)
-      setSelectedProjectId((current) => current ?? nextProjects[0]?.id ?? null)
-      setAllTasksByProject(Object.fromEntries(taskEntries))
-    } catch (error) {
-      if (allRequestId.current !== requestId) return
-      setAllError(error instanceof Error ? error.message : 'Failed to load projects')
-    } finally {
-      if (allRequestId.current === requestId) {
-        setIsAllLoading(false)
-      }
+  const timelineTicks = useMemo(() => {
+    if (!timelineRange) return []
+    const tickCount = 4
+    const ticks: Array<{ label: string; position: number }> = []
+    const rangeMs = Math.max(1, timelineRange.endMs - timelineRange.startMs)
+
+    for (let i = 0; i <= tickCount; i += 1) {
+      const ratio = i / tickCount
+      const tickDate = new Date(timelineRange.startMs + rangeMs * ratio)
+      ticks.push({ label: formatShortDate(tickDate), position: ratio * 100 })
     }
-  }
+
+    return ticks
+  }, [timelineRange])
+
+  const dependencyLines = useMemo(() => {
+    if (!timelineRange || timelineWidth === 0) return []
+    const rangeMs = Math.max(1, timelineRange.endMs - timelineRange.startMs)
+
+    const toX = (date: Date) => ((date.getTime() - timelineRange.startMs) / rangeMs) * timelineWidth
+    const toY = (index: number) => index * ROW_HEIGHT + ROW_HEIGHT / 2
+
+    const lines: Array<{ id: string; x1: number; y1: number; x2: number; y2: number }> = []
+
+    taskRows.forEach((row, rowIndex) => {
+      const taskRange = getTaskRange(row.task)
+      if (!taskRange) return
+
+      row.task.dependsOn.forEach((dependencyId) => {
+        const dependencyIndex = taskIndexById.get(dependencyId)
+        if (dependencyIndex === undefined) return
+        const dependencyTask = taskRows[dependencyIndex]?.task
+        if (!dependencyTask) return
+
+        const dependencyRange = getTaskRange(dependencyTask)
+        if (!dependencyRange) return
+
+        lines.push({
+          id: `${dependencyId}-${row.task.id}`,
+          x1: toX(dependencyRange.end),
+          y1: toY(dependencyIndex),
+          x2: toX(taskRange.start),
+          y2: toY(rowIndex),
+        })
+      })
+    })
+
+    return lines
+  }, [taskIndexById, taskRows, timelineRange, timelineWidth])
+
+  const timelineRangeLabel = timelineRange
+    ? `${formatDate(timelineRange.start)} - ${formatDate(timelineRange.end)}`
+    : 'No scheduled dates'
 
   return (
     <div className="app">
       <header className="app__header">
         <div>
           <p className="app__eyebrow">Project Insights</p>
-          <h1 className="app__title">Task Management Viewer</h1>
+          <h1 className="app__title">Task Timeline</h1>
         </div>
         <div className="app__meta">
           <span>API: {import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4500'}</span>
-        </div>
-        <div className="app__actions">
-          <button
-            type="button"
-            className="primary-button"
-            onClick={handleLoadAllProjects}
-            disabled={isAllLoading}
-          >
-            {isAllLoading ? 'Loading all projects...' : 'Load all projects & tasks'}
-          </button>
         </div>
       </header>
 
@@ -172,8 +270,8 @@ function App() {
 
         <section className="panel panel--wide">
           <div className="panel__header">
-            <h2>Tasks</h2>
-            <span className="panel__count">{tasks.length}</span>
+            <h2>Gantt view</h2>
+            <span className="panel__muted">{timelineRangeLabel}</span>
           </div>
 
           {!selectedProject && !isProjectsLoading && (
@@ -193,65 +291,102 @@ function App() {
           {isTasksLoading && <p className="panel__muted">Loading tasks…</p>}
           {tasksError && <p className="panel__error">{tasksError}</p>}
 
-          <div className="task-list">
-            {tasks.map((task) => (
-              <div key={task.id} className="task-row">
-                <div>
-                  <h4>{task.name}</h4>
-                  <p className="panel__muted">
-                    Start {formatDate(task.startDate)} • Due {formatDate(task.dueDate)}
-                  </p>
-                </div>
-                <div className={`status-pill status-pill--${task.status.replace(' ', '-')}`}>
-                  {task.status}
+          {!isTasksLoading && !tasksError && taskRows.length === 0 && (
+            <p className="panel__muted">No tasks available for this project.</p>
+          )}
+
+          {taskRows.length > 0 && (
+            <div className="gantt">
+              <div className="gantt__header">
+                <span>Task</span>
+                <div className="gantt__axis" aria-hidden="true">
+                  {timelineTicks.map((tick) => (
+                    <span key={tick.position} style={{ left: `${tick.position}%` }}>
+                      {tick.label}
+                    </span>
+                  ))}
                 </div>
               </div>
-            ))}
-          </div>
 
-          <div className="panel__section">
-            <div className="panel__section-header">
-              <h3>All projects and tasks</h3>
-              {isAllLoading && <span className="panel__muted">Loading...</span>}
-            </div>
-
-            {allError && <p className="panel__error">{allError}</p>}
-
-            {!isAllLoading && !allError && allProjectGroups.length === 0 && (
-              <p className="panel__muted">Use the button above to load every project and its tasks.</p>
-            )}
-
-            {allProjectGroups.map(({ project, tasks: groupedTasks }) => (
-              <div key={project.id} className="project-group">
-                <div className="project-group__header">
-                  <div>
-                    <h4>{project.name}</h4>
-                    <p className="panel__muted">{groupedTasks.length} tasks</p>
-                  </div>
-                  <div className="project-group__dates">
-                    <span>Start: {formatDate(project.earliestStartDate)}</span>
-                    <span>End: {formatDate(project.latestEndDate)}</span>
-                  </div>
-                </div>
-
-                <div className="task-list">
-                  {groupedTasks.map((task) => (
-                    <div key={task.id} className="task-row">
+              <div className="gantt__body">
+                <div className="gantt__tasks">
+                  {taskRows.map(({ task, depth, number }) => (
+                    <div key={task.id} className="gantt__row" style={{ paddingLeft: `${depth * 16}px` }}>
                       <div>
-                        <h4>{task.name}</h4>
+                        <p className="gantt__task-name">{number}. {task.name}</p>
                         <p className="panel__muted">
-                          Start {formatDate(task.startDate)} • Due {formatDate(task.dueDate)}
+                          {task.status} • Start {formatDate(task.startDate)} • Due {formatDate(task.dueDate)}
                         </p>
-                      </div>
-                      <div className={`status-pill status-pill--${task.status.replace(' ', '-')}`}>
-                        {task.status}
                       </div>
                     </div>
                   ))}
                 </div>
+
+                <div className="gantt__timeline" ref={timelineRef}>
+                  <div className="gantt__grid" aria-hidden="true">
+                    {timelineTicks.map((tick) => (
+                      <span key={tick.position} style={{ left: `${tick.position}%` }} />
+                    ))}
+                  </div>
+
+                  <svg
+                    className="gantt__overlay"
+                    width={timelineWidth}
+                    height={taskRows.length * ROW_HEIGHT}
+                    viewBox={`0 0 ${timelineWidth} ${taskRows.length * ROW_HEIGHT}`}
+                  >
+                    <defs>
+                      <marker
+                        id="arrow"
+                        markerWidth="8"
+                        markerHeight="8"
+                        refX="6"
+                        refY="3"
+                        orient="auto"
+                      >
+                        <path d="M0,0 L0,6 L6,3 z" fill="#94a3b8" />
+                      </marker>
+                    </defs>
+                    {dependencyLines.map((line) => (
+                      <line
+                        key={line.id}
+                        x1={line.x1}
+                        y1={line.y1}
+                        x2={line.x2}
+                        y2={line.y2}
+                        stroke="#94a3b8"
+                        strokeWidth="1"
+                        markerEnd="url(#arrow)"
+                      />
+                    ))}
+                  </svg>
+
+                  <div className="gantt__bars" aria-hidden="true">
+                    {taskRows.map(({ task }, index) => {
+                      const range = getTaskRange(task)
+                      if (!range || !timelineRange) return <span key={task.id} className="gantt__bar" />
+                      const rangeMs = Math.max(1, timelineRange.endMs - timelineRange.startMs)
+                      const left = ((range.start.getTime() - timelineRange.startMs) / rangeMs) * 100
+                      const width = ((range.end.getTime() - range.start.getTime()) / rangeMs) * 100
+                      const barWidth = Math.max(width, 1)
+
+                      return (
+                        <span
+                          key={task.id}
+                          className={`gantt__bar gantt__bar--${task.status.replace(' ', '-')}`}
+                          style={{
+                            top: `${index * ROW_HEIGHT + ROW_HEIGHT / 2 - 8}px`,
+                            left: `${left}%`,
+                            width: `${barWidth}%`,
+                          }}
+                        />
+                      )
+                    })}
+                  </div>
+                </div>
               </div>
-            ))}
-          </div>
+            </div>
+          )}
         </section>
       </main>
     </div>
