@@ -185,6 +185,43 @@
   border-bottom: 1px solid #f1f5f9;
 }
 
+.gantt__task {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.gantt__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gantt__toggle--spacer {
+  cursor: default;
+}
+
+.gantt__toggle-icon {
+  width: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+}
+
+.gantt__toggle:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
 .gantt__task-name {
   margin: 0;
   font-size: 0.95rem;

@@ -5,6 +5,8 @@ import { getProjectTasks, getProjects } from './api'
 
 const ROW_HEIGHT = 48
 
+type TaskRow = { task: Task; depth: number; number: string; hasChildren: boolean; isCollapsed: boolean }
+
 function parseDate(value: string | null) {
   if (!value) return null
   const date = new Date(value)
@@ -30,7 +32,7 @@ function compareTasks(a: Task, b: Task) {
   return a.name.localeCompare(b.name)
 }
 
-function buildTaskRows(tasks: Task[]) {
+function buildTaskRows(tasks: Task[], collapsedTaskIds: Set<number>) {
   const byParent = new Map<number | null, Task[]>()
   tasks.forEach((task) => {
     const key = task.parentTaskId ?? null
@@ -42,11 +44,15 @@ function buildTaskRows(tasks: Task[]) {
     }
   })
 
-  const rows: Array<{ task: Task; depth: number; number: string }> = []
+  const rows: TaskRow[] = []
   const visit = (task: Task, depth: number, number: string) => {
-    rows.push({ task, depth, number })
     const children = (byParent.get(task.id) ?? []).slice().sort(compareTasks)
-    children.forEach((child, index) => visit(child, depth + 1, `${number}.${index + 1}`))
+    const hasChildren = children.length > 0
+    const isCollapsed = collapsedTaskIds.has(task.id)
+    rows.push({ task, depth, number, hasChildren, isCollapsed })
+    if (!isCollapsed) {
+      children.forEach((child, index) => visit(child, depth + 1, `${number}.${index + 1}`))
+    }
   }
 
   const roots = (byParent.get(null) ?? []).slice().sort(compareTasks)
@@ -70,6 +76,7 @@ function App() {
   const [tasksError, setTasksError] = useState<string | null>(null)
   const [isProjectsLoading, setIsProjectsLoading] = useState(true)
   const [isTasksLoading, setIsTasksLoading] = useState(false)
+  const [collapsedTaskIds, setCollapsedTaskIds] = useState<Set<number>>(() => new Set())
   const timelineRef = useRef<HTMLDivElement | null>(null)
   const [timelineWidth, setTimelineWidth] = useState(0)
 
@@ -132,6 +139,10 @@ function App() {
     }
   }, [selectedProjectId])
 
+  useEffect(() => {
+    setCollapsedTaskIds(new Set())
+  }, [selectedProjectId])
+
   useLayoutEffect(() => {
     const element = timelineRef.current
     if (!element) return
@@ -151,12 +162,24 @@ function App() {
     [projects, selectedProjectId]
   )
 
-  const taskRows = useMemo(() => buildTaskRows(tasks), [tasks])
+  const taskRows = useMemo(() => buildTaskRows(tasks, collapsedTaskIds), [collapsedTaskIds, tasks])
   const taskIndexById = useMemo(() => {
     const map = new Map<number, number>()
     taskRows.forEach((row, index) => map.set(row.task.id, index))
     return map
   }, [taskRows])
+
+  const toggleTaskCollapse = (taskId: number) => {
+    setCollapsedTaskIds((previous) => {
+      const next = new Set(previous)
+      if (next.has(taskId)) {
+        next.delete(taskId)
+      } else {
+        next.add(taskId)
+      }
+      return next
+    })
+  }
 
   const timelineRange = useMemo(() => {
     const ranges = tasks.map(getTaskRange).filter(Boolean) as Array<{ start: Date; end: Date }>
@@ -310,10 +333,27 @@ function App() {
 
               <div className="gantt__body">
                 <div className="gantt__tasks">
-                  {taskRows.map(({ task, depth, number }) => (
+                  {taskRows.map(({ task, depth, number, hasChildren, isCollapsed }) => (
                     <div key={task.id} className="gantt__row" style={{ paddingLeft: `${depth * 16}px` }}>
-                      <div>
-                        <p className="gantt__task-name">{number}. {task.name}</p>
+                      <div className="gantt__task">
+                        {hasChildren ? (
+                          <button
+                            type="button"
+                            className="gantt__toggle"
+                            aria-expanded={!isCollapsed}
+                            onClick={() => toggleTaskCollapse(task.id)}
+                          >
+                            <span className="gantt__toggle-icon" aria-hidden="true">
+                              {isCollapsed ? '▸' : '▾'}
+                            </span>
+                            <span className="gantt__task-name">{number}. {task.name}</span>
+                          </button>
+                        ) : (
+                          <div className="gantt__toggle gantt__toggle--spacer">
+                            <span className="gantt__toggle-icon" aria-hidden="true" />
+                            <span className="gantt__task-name">{number}. {task.name}</span>
+                          </div>
+                        )}
                         <p className="panel__muted">
                           {task.status} • Start {formatDate(task.startDate)} • Due {formatDate(task.dueDate)}
                         </p>
@@ -363,24 +403,24 @@ function App() {
 
                   <div className="gantt__bars" aria-hidden="true">
                     {taskRows.map(({ task }, index) => {
-                      const range = getTaskRange(task)
-                      if (!range || !timelineRange) return <span key={task.id} className="gantt__bar" />
-                      const rangeMs = Math.max(1, timelineRange.endMs - timelineRange.startMs)
-                      const left = ((range.start.getTime() - timelineRange.startMs) / rangeMs) * 100
-                      const width = ((range.end.getTime() - range.start.getTime()) / rangeMs) * 100
-                      const barWidth = Math.max(width, 1)
+                       const range = getTaskRange(task)
+                       if (!range || !timelineRange) return <span key={task.id} className="gantt__bar" />
+                       const rangeMs = Math.max(1, timelineRange.endMs - timelineRange.startMs)
+                       const left = ((range.start.getTime() - timelineRange.startMs) / rangeMs) * 100
+                       const width = ((range.end.getTime() - range.start.getTime()) / rangeMs) * 100
+                       const barWidth = Math.max(width, 1)
 
-                      return (
-                        <span
-                          key={task.id}
-                          className={`gantt__bar gantt__bar--${task.status.replace(' ', '-')}`}
-                          style={{
-                            top: `${index * ROW_HEIGHT + ROW_HEIGHT / 2 - 8}px`,
-                            left: `${left}%`,
-                            width: `${barWidth}%`,
-                          }}
-                        />
-                      )
+                       return (
+                         <span
+                           key={task.id}
+                           className={`gantt__bar gantt__bar--${task.status.replace(' ', '-')}`}
+                           style={{
+                             top: `${index * ROW_HEIGHT + ROW_HEIGHT / 2 - 8}px`,
+                             left: `${left}%`,
+                             width: `${barWidth}%`,
+                           }}
+                         />
+                       )
                     })}
                   </div>
                 </div>
